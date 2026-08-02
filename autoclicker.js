@@ -1,7 +1,7 @@
 // ============================================================
 // autoclicker.js — LinkedIn Job Auto-Clicker (v6 — merged)
-// Injected by popup.js via chrome.scripting.executeScript ONLY
-// when the user explicitly clicks "Start". Never runs on load.
+// Injected by background.js via chrome.scripting.executeScript
+// only when the user explicitly clicks "Start". Never runs on load.
 //
 // Architecture:
 //   Start → check LICENSE_STATUS → if active → click loop
@@ -11,9 +11,22 @@
 // Delay: randomized 8–35s per click.
 // Floor: 8s minimum hardcoded in getDelay() — NOT bypassable
 //   by any caller, including raw message.
+//
+// BRIDGE ARCHITECTURE:
+//   MV3 blocks extension API access from dynamically-evaluated code
+//   (new Function()) regardless of ISOLATED/MAIN world. This file is
+//   therefore written as a FACTORY function that accepts a "bridge"
+//   object as its only parameter. The bridge is built in background.js's
+//   STATIC extension code (which legitimately has chrome.* access) and
+//   passed into the eval'd code. The factory never touches chrome.*
+//   directly — it uses bridge.sendMessage() and bridge.onMessage().
+//
+//   bridge interface:
+//     bridge.sendMessage(msg, callback?) → chrome.runtime.sendMessage
+//     bridge.onMessage(handler)          → chrome.runtime.onMessage.addListener
 // ============================================================
 
-(function(){ "use strict";
+function autoClickerFactory(bridge){ "use strict";
 
 var MIN_DELAY = 8000;  // 8-second hard floor (NOT bypassable)
 var MAX_DELAY = 35000;  // 35-second default max
@@ -37,17 +50,9 @@ var state = {
 
 function checkLicense() {
   return new Promise(function(resolve, reject) {
-    chrome.runtime.sendMessage(
-      { type: "LICENSE_STATUS" },
-      function(resp) {
-        if (chrome.runtime.lastError) {
-          console.error("[AutoClicker] LICENSE_STATUS error:", chrome.runtime.lastError.message);
-          resolve(false);
-          return;
-        }
-        resolve(resp && resp.effectivelyActive === true);
-      }
-    );
+    bridge.sendMessage({ type: "LICENSE_STATUS" }, function(resp) {
+      resolve(resp && resp.effectivelyActive === true);
+    });
   });
 }
 
@@ -55,8 +60,8 @@ function checkLicense() {
 
 /**
  * Returns a random delay (ms) between MIN_DELAY and the configured max.
- * The 10s floor is enforced HERE in autoclicker.js, regardless of what
- * delayMin/delayMax values are sent from the popup.
+ * The 8s floor is enforced HERE, regardless of what delayMin/delayMax
+ * values are sent from the popup.
  */
 function getDelay() {
   var min = state.delayMin;
@@ -76,8 +81,9 @@ function getDelay() {
 }
 
 // ── MESSAGE DISPATCH ──────────────────────────────────────────
+// Uses bridge.onMessage() instead of chrome.runtime.onMessage.addListener()
 
-chrome.runtime.onMessage.addListener(function(msg, sender, sendResponse) {
+bridge.onMessage(function(msg, sender, sendResponse) {
   if (msg.source !== "popup") return;
 
   if (msg.action === "PING") {
@@ -119,7 +125,7 @@ chrome.runtime.onMessage.addListener(function(msg, sender, sendResponse) {
   }
 });
 
-// ── Job Card Detection (unchanged from original) ─────────────
+// ── Job Card Detection ────────────────────────────────────────
 
 function getJobCards() {
   var column = document.querySelector('[data-testid="lazy-column"]');
@@ -174,7 +180,7 @@ function getClickableElement(card) {
   return inner || card;
 }
 
-// ── Pagination (unchanged from original) ─────────────────────
+// ── Pagination ────────────────────────────────────────────────
 
 function getNextPageButton() {
   var exact = document.querySelector('[data-testid="pagination-controls-next-button-visible"]');
@@ -283,14 +289,11 @@ async function clickCurrentPage() {
 async function clickNext() {
   if (!state.isRunning) return;
 
-  // 🔐 LICENSE CHECK — every click cycle, not just at start
+  // LICENSE CHECK — every click cycle
   var licActive = await checkLicense();
   state.licenseActive = licActive;
   if (!licActive) {
-    notifyPopup({
-      type: 'LICENSE_CANCELLED',
-      totalClicked: state.totalClicked
-    });
+    notifyPopup({ type: 'LICENSE_CANCELLED', totalClicked: state.totalClicked });
     state.isRunning = false;
     return;
   }
@@ -301,19 +304,11 @@ async function clickNext() {
 
     if (!nextBtn) {
       state.isRunning = false;
-      notifyPopup({
-        type: 'ALL_DONE',
-        totalClicked: state.totalClicked,
-        totalPages: state.currentPage
-      });
+      notifyPopup({ type: 'ALL_DONE', totalClicked: state.totalClicked, totalPages: state.currentPage });
       return;
     }
 
-    notifyPopup({
-      type: 'NAVIGATING',
-      page: state.currentPage + 1,
-      totalClicked: state.totalClicked
-    });
+    notifyPopup({ type: 'NAVIGATING', page: state.currentPage + 1, totalClicked: state.totalClicked });
 
     var snapshotBefore = getPageSnapshot();
 
@@ -380,9 +375,12 @@ function stopAutoClick() {
   notifyPopup({ type: 'STOPPED', totalClicked: state.totalClicked });
 }
 
+// ── Notify popup via bridge ──────────────────────────────────
+// Uses bridge.sendMessage() instead of chrome.runtime.sendMessage()
+
 function notifyPopup(data) {
   try {
-    chrome.runtime.sendMessage(
+    bridge.sendMessage(
       Object.assign({}, data, { source: 'autoclicker' })
     );
   } catch(e) {}
@@ -392,4 +390,4 @@ function sleep(ms) {
   return new Promise(function(resolve) { setTimeout(resolve, ms); });
 }
 
-})();
+} // end autoClickerFactory
